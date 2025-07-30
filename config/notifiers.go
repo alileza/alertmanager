@@ -87,17 +87,18 @@ var (
 		NotifierConfig: NotifierConfig{
 			VSendResolved: false,
 		},
-		Color:      `{{ if eq .Status "firing" }}danger{{ else }}good{{ end }}`,
-		Username:   `{{ template "slack.default.username" . }}`,
-		Title:      `{{ template "slack.default.title" . }}`,
-		TitleLink:  `{{ template "slack.default.titlelink" . }}`,
-		IconEmoji:  `{{ template "slack.default.iconemoji" . }}`,
-		IconURL:    `{{ template "slack.default.iconurl" . }}`,
-		Pretext:    `{{ template "slack.default.pretext" . }}`,
-		Text:       `{{ template "slack.default.text" . }}`,
-		Fallback:   `{{ template "slack.default.fallback" . }}`,
-		CallbackID: `{{ template "slack.default.callbackid" . }}`,
-		Footer:     `{{ template "slack.default.footer" . }}`,
+		Color:        `{{ if eq .Status "firing" }}danger{{ else }}good{{ end }}`,
+		Username:     `{{ template "slack.default.username" . }}`,
+		Title:        `{{ template "slack.default.title" . }}`,
+		TitleLink:    `{{ template "slack.default.titlelink" . }}`,
+		IconEmoji:    `{{ template "slack.default.iconemoji" . }}`,
+		IconURL:      `{{ template "slack.default.iconurl" . }}`,
+		Pretext:      `{{ template "slack.default.pretext" . }}`,
+		Text:         `{{ template "slack.default.text" . }}`,
+		Fallback:     `{{ template "slack.default.fallback" . }}`,
+		CallbackID:   `{{ template "slack.default.callbackid" . }}`,
+		Footer:       `{{ template "slack.default.footer" . }}`,
+		UseThreading: true,
 	}
 	// DefaultRocketchatConfig defines default values for Rocketchat configurations.
 	DefaultRocketchatConfig = RocketchatConfig{
@@ -504,6 +505,9 @@ type SlackConfig struct {
 	LinkNames   bool           `yaml:"link_names" json:"link_names,omitempty"`
 	MrkdwnIn    []string       `yaml:"mrkdwn_in,omitempty" json:"mrkdwn_in,omitempty"`
 	Actions     []*SlackAction `yaml:"actions,omitempty" json:"actions,omitempty"`
+	// UseThreading enables threading for subsequent notifications to keep conversations organized.
+	// When enabled, resolve alerts will be sent as replies to the initial alert thread.
+	UseThreading bool `yaml:"use_threading" json:"use_threading,omitempty"`
 }
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface.

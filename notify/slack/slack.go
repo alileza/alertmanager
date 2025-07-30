@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
 	commoncfg "github.com/prometheus/common/config"
 
@@ -44,6 +45,10 @@ type Notifier struct {
 	retrier *notify.Retrier
 
 	postJSONFunc func(ctx context.Context, client *http.Client, url string, body io.Reader) (*http.Response, error)
+
+	// threadTimestamps stores message timestamps for threading
+	// Key: groupKey_receiverName, Value: message timestamp for threading
+	threadTimestamps sync.Map
 }
 
 // New returns a new Slack notification handler.
@@ -70,6 +75,7 @@ type request struct {
 	IconEmoji   string       `json:"icon_emoji,omitempty"`
 	IconURL     string       `json:"icon_url,omitempty"`
 	LinkNames   bool         `json:"link_names,omitempty"`
+	ThreadTS    string       `json:"thread_ts,omitempty"`
 	Attachments []attachment `json:"attachments"`
 }
 
@@ -184,6 +190,23 @@ func (n *Notifier) Notify(ctx context.Context, as ...*types.Alert) (bool, error)
 		LinkNames:   n.conf.LinkNames,
 		Attachments: []attachment{*att},
 	}
+
+	// Handle threading if enabled
+	if n.conf.UseThreading {
+		groupKey, err := notify.ExtractGroupKey(ctx)
+		if err == nil {
+			receiverName, _ := notify.ReceiverName(ctx)
+			threadKey := fmt.Sprintf("%s_%s", groupKey, receiverName)
+
+			// Check if this is a subsequent notification (e.g., resolve)
+			// by looking for an existing thread timestamp
+			if ts, ok := n.threadTimestamps.Load(threadKey); ok {
+				req.ThreadTS = ts.(string)
+				n.logger.Debug("Using existing thread for notification", "thread_ts", req.ThreadTS, "group_key", groupKey)
+			}
+		}
+	}
+
 	if err != nil {
 		return false, err
 	}
@@ -210,9 +233,15 @@ func (n *Notifier) Notify(ctx context.Context, as ...*types.Alert) (bool, error)
 	}
 	defer notify.Drain(resp)
 
+	// Read the response body for processing
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return true, fmt.Errorf("could not read response body: %w", err)
+	}
+
 	// Use a retrier to generate an error message for non-200 responses and
 	// classify them as retriable or not.
-	retry, err := n.retrier.Check(resp.StatusCode, resp.Body)
+	retry, err := n.retrier.Check(resp.StatusCode, bytes.NewReader(body))
 	if err != nil {
 		err = fmt.Errorf("channel %q: %w", req.Channel, err)
 		return retry, notify.NewErrorWithReason(notify.GetFailureReasonFromStatusCode(resp.StatusCode), err)
@@ -220,10 +249,23 @@ func (n *Notifier) Notify(ctx context.Context, as ...*types.Alert) (bool, error)
 
 	// Slack web API might return errors with a 200 response code.
 	// https://slack.dev/node-slack-sdk/web-api#handle-errors
-	retry, err = checkResponseError(resp)
+	retry, err = checkResponseError2(body)
 	if err != nil {
 		err = fmt.Errorf("channel %q: %w", req.Channel, err)
 		return retry, notify.NewErrorWithReason(notify.ClientErrorReason, err)
+	}
+
+	// Store thread timestamp for future use if threading is enabled and this is a new thread
+	if n.conf.UseThreading && req.ThreadTS == "" {
+		if slackResp, err := parseSlackResponse(body); err == nil && slackResp.OK && slackResp.TS != "" {
+			groupKey, err := notify.ExtractGroupKey(ctx)
+			if err == nil {
+				receiverName, _ := notify.ReceiverName(ctx)
+				threadKey := fmt.Sprintf("%s_%s", groupKey, receiverName)
+				n.threadTimestamps.Store(threadKey, slackResp.TS)
+				n.logger.Debug("Stored thread timestamp for future notifications", "thread_ts", slackResp.TS, "group_key", groupKey)
+			}
+		}
 	}
 
 	return retry, nil
@@ -269,4 +311,29 @@ func checkJSONResponseError(body []byte) (bool, error) {
 		return false, fmt.Errorf("error response from Slack: %s", data.Error)
 	}
 	return false, nil
+}
+
+// slackResponse represents the successful response from Slack API
+type slackResponse struct {
+	OK      bool   `json:"ok"`
+	TS      string `json:"ts"`      // Message timestamp
+	Channel string `json:"channel"` // Channel ID
+	Error   string `json:"error"`   // Error message if not OK
+}
+
+// parseSlackResponse extracts the timestamp from a successful Slack API response
+func parseSlackResponse(body []byte) (*slackResponse, error) {
+	var resp slackResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("could not unmarshal Slack response: %w", err)
+	}
+	return &resp, nil
+}
+
+// checkResponseError2 is like checkResponseError but works with a byte slice
+func checkResponseError2(body []byte) (bool, error) {
+	if strings.HasPrefix(string(body), "{") {
+		return checkJSONResponseError(body)
+	}
+	return checkTextResponseError(body)
 }

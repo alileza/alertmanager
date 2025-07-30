@@ -15,6 +15,7 @@ package slack
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -233,4 +234,74 @@ func TestNotifier_Notify_WithReason(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSlackThreading(t *testing.T) {
+	apiurl, _ := url.Parse("https://slack.com/post.Message")
+	notifier, err := New(
+		&config.SlackConfig{
+			NotifierConfig: config.NotifierConfig{},
+			HTTPConfig:     &commoncfg.HTTPClientConfig{},
+			APIURL:         &config.SecretURL{URL: apiurl},
+			Channel:        "channelname",
+			UseThreading:   true,
+		},
+		test.CreateTmpl(t),
+		promslog.NewNopLogger(),
+	)
+	require.NoError(t, err)
+
+	// Track the requests made
+	var requests []map[string]interface{}
+	notifier.postJSONFunc = func(ctx context.Context, client *http.Client, url string, body io.Reader) (*http.Response, error) {
+		// Parse the request body
+		var req map[string]interface{}
+		bodyBytes, _ := io.ReadAll(body)
+		json.Unmarshal(bodyBytes, &req)
+		requests = append(requests, req)
+
+		resp := httptest.NewRecorder()
+		resp.Header().Add("Content-Type", "application/json; charset=utf-8")
+		resp.WriteHeader(http.StatusOK)
+
+		// Return a successful response with timestamp
+		respBody := `{"ok":true,"ts":"1234567890.123456","channel":"C1234567890"}`
+		resp.WriteString(respBody)
+		return resp.Result(), nil
+	}
+
+	ctx := context.Background()
+	ctx = notify.WithGroupKey(ctx, "test-group")
+	ctx = notify.WithReceiverName(ctx, "test-receiver")
+
+	// First notification (firing alert) - should not have thread_ts
+	alert1 := &types.Alert{
+		Alert: model.Alert{
+			StartsAt: time.Now(),
+			EndsAt:   time.Now().Add(time.Hour),
+		},
+	}
+	retry, err := notifier.Notify(ctx, alert1)
+	require.NoError(t, err)
+	require.False(t, retry)
+
+	// Verify first request has no thread_ts
+	require.Len(t, requests, 1)
+	require.NotContains(t, requests[0], "thread_ts")
+
+	// Second notification (resolved alert) - should have thread_ts
+	alert2 := &types.Alert{
+		Alert: model.Alert{
+			StartsAt: time.Now(),
+			EndsAt:   time.Now(), // Resolved
+		},
+	}
+	retry, err = notifier.Notify(ctx, alert2)
+	require.NoError(t, err)
+	require.False(t, retry)
+
+	// Verify second request has thread_ts
+	require.Len(t, requests, 2)
+	require.Contains(t, requests[1], "thread_ts")
+	require.Equal(t, "1234567890.123456", requests[1]["thread_ts"])
 }

@@ -119,6 +119,7 @@ const (
 	keyMuteTimeIntervals
 	keyActiveTimeIntervals
 	keyRouteID
+	keySlackThreadTS
 )
 
 // WithReceiverName populates a context with a receiver name.
@@ -167,6 +168,11 @@ func WithActiveTimeIntervals(ctx context.Context, at []string) context.Context {
 
 func WithRouteID(ctx context.Context, routeID string) context.Context {
 	return context.WithValue(ctx, keyRouteID, routeID)
+}
+
+// WithSlackThreadTS sets the Slack thread timestamp in the context.
+func WithSlackThreadTS(ctx context.Context, ts string) context.Context {
+	return context.WithValue(ctx, keySlackThreadTS, ts)
 }
 
 // RepeatInterval extracts a repeat interval from the context. Iff none exists, the
@@ -239,6 +245,12 @@ func RouteID(ctx context.Context) (string, bool) {
 	return v, ok
 }
 
+// SlackThreadTS extracts the Slack thread timestamp from the context.
+func SlackThreadTS(ctx context.Context) (string, bool) {
+	v, ok := ctx.Value(keySlackThreadTS).(string)
+	return v, ok
+}
+
 // A Stage processes alerts under the constraints of the given context.
 type Stage interface {
 	Exec(ctx context.Context, l *slog.Logger, alerts ...*types.Alert) (context.Context, []*types.Alert, error)
@@ -253,7 +265,7 @@ func (f StageFunc) Exec(ctx context.Context, l *slog.Logger, alerts ...*types.Al
 }
 
 type NotificationLog interface {
-	Log(r *nflogpb.Receiver, gkey string, firingAlerts, resolvedAlerts []uint64, expiry time.Duration) error
+	Log(r *nflogpb.Receiver, gkey string, firingAlerts, resolvedAlerts []uint64, threadTS string, expiry time.Duration) error
 	Query(params ...nflog.QueryParam) ([]*nflogpb.Entry, error)
 }
 
@@ -935,8 +947,9 @@ func (n SetNotifiesStage) Exec(ctx context.Context, l *slog.Logger, alerts ...*t
 		return ctx, nil, errors.New("repeat interval missing")
 	}
 	expiry := 2 * repeat
+	ts, _ := SlackThreadTS(ctx)
 
-	return ctx, alerts, n.nflog.Log(n.recv, gkey, firing, resolved, expiry)
+	return ctx, alerts, n.nflog.Log(n.recv, gkey, firing, resolved, ts, expiry)
 }
 
 type timeStage struct {

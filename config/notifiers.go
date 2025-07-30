@@ -98,6 +98,7 @@ var (
 		Fallback:   `{{ template "slack.default.fallback" . }}`,
 		CallbackID: `{{ template "slack.default.callbackid" . }}`,
 		Footer:     `{{ template "slack.default.footer" . }}`,
+		ThreadTS:   "",
 	}
 	// DefaultRocketchatConfig defines default values for Rocketchat configurations.
 	DefaultRocketchatConfig = RocketchatConfig{
@@ -504,6 +505,7 @@ type SlackConfig struct {
 	LinkNames   bool           `yaml:"link_names" json:"link_names,omitempty"`
 	MrkdwnIn    []string       `yaml:"mrkdwn_in,omitempty" json:"mrkdwn_in,omitempty"`
 	Actions     []*SlackAction `yaml:"actions,omitempty" json:"actions,omitempty"`
+	ThreadTS    string         `yaml:"thread_ts,omitempty" json:"thread_ts,omitempty"`
 }
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface.

@@ -119,6 +119,8 @@ const (
 	keyMuteTimeIntervals
 	keyActiveTimeIntervals
 	keyRouteID
+	keySlackThreadTS
+	keyNotificationLog
 )
 
 // WithReceiverName populates a context with a receiver name.
@@ -167,6 +169,26 @@ func WithActiveTimeIntervals(ctx context.Context, at []string) context.Context {
 
 func WithRouteID(ctx context.Context, routeID string) context.Context {
 	return context.WithValue(ctx, keyRouteID, routeID)
+}
+
+// SlackThreadTSContainer holds a mutable Slack thread timestamp
+type SlackThreadTSContainer struct {
+	ThreadTS string
+}
+
+// WithSlackThreadTS populates a context with a Slack thread timestamp.
+func WithSlackThreadTS(ctx context.Context, threadTS string) context.Context {
+	return context.WithValue(ctx, keySlackThreadTS, threadTS)
+}
+
+// WithSlackThreadTSContainer populates a context with a mutable Slack thread timestamp container.
+func WithSlackThreadTSContainer(ctx context.Context, container *SlackThreadTSContainer) context.Context {
+	return context.WithValue(ctx, keySlackThreadTS, container)
+}
+
+// WithNotificationLog populates a context with a notification log.
+func WithNotificationLog(ctx context.Context, nflog *nflog.Log) context.Context {
+	return context.WithValue(ctx, keyNotificationLog, nflog)
 }
 
 // RepeatInterval extracts a repeat interval from the context. Iff none exists, the
@@ -237,6 +259,34 @@ func ActiveTimeIntervalNames(ctx context.Context) ([]string, bool) {
 func RouteID(ctx context.Context) (string, bool) {
 	v, ok := ctx.Value(keyRouteID).(string)
 	return v, ok
+}
+
+// SlackThreadTS extracts a Slack thread timestamp from the context. Iff none exists, the
+// second argument is false.
+func SlackThreadTS(ctx context.Context) (string, bool) {
+	v := ctx.Value(keySlackThreadTS)
+	if threadTS, ok := v.(string); ok {
+		return threadTS, true
+	}
+	if container, ok := v.(*SlackThreadTSContainer); ok {
+		return container.ThreadTS, container.ThreadTS != ""
+	}
+	return "", false
+}
+
+// SlackThreadTSContainer extracts a Slack thread timestamp container from the context.
+func SlackThreadTSContainerFromContext(ctx context.Context) (*SlackThreadTSContainer, bool) {
+	v, ok := ctx.Value(keySlackThreadTS).(*SlackThreadTSContainer)
+	return v, ok
+}
+
+// NotificationLogFromContext extracts a notification log from the context. Iff none exists, nil is returned.
+func NotificationLogFromContext(ctx context.Context) *nflog.Log {
+	v, ok := ctx.Value(keyNotificationLog).(*nflog.Log)
+	if !ok {
+		return nil
+	}
+	return v
 }
 
 // A Stage processes alerts under the constraints of the given context.
@@ -438,7 +488,7 @@ func createReceiverStage(
 		var s MultiStage
 		s = append(s, NewWaitStage(wait))
 		s = append(s, NewDedupStage(&integrations[i], notificationLog, recv))
-		s = append(s, NewRetryStage(integrations[i], name, metrics))
+		s = append(s, NewRetryStage(integrations[i], name, notificationLog, metrics))
 		s = append(s, NewSetNotifiesStage(notificationLog, recv))
 
 		fs = append(fs, s)
@@ -751,14 +801,15 @@ func (n *DedupStage) Exec(ctx context.Context, _ *slog.Logger, alerts ...*types.
 // RetryStage notifies via passed integration with exponential backoff until it
 // succeeds. It aborts if the context is canceled or timed out.
 type RetryStage struct {
-	integration Integration
-	groupName   string
-	metrics     *Metrics
-	labelValues []string
+	integration     Integration
+	groupName       string
+	notificationLog NotificationLog
+	metrics         *Metrics
+	labelValues     []string
 }
 
 // NewRetryStage returns a new instance of a RetryStage.
-func NewRetryStage(i Integration, groupName string, metrics *Metrics) *RetryStage {
+func NewRetryStage(i Integration, groupName string, notificationLog NotificationLog, metrics *Metrics) *RetryStage {
 	labelValues := []string{i.Name()}
 
 	if metrics.ff.EnableReceiverNamesInMetrics() {
@@ -766,10 +817,11 @@ func NewRetryStage(i Integration, groupName string, metrics *Metrics) *RetryStag
 	}
 
 	return &RetryStage{
-		integration: i,
-		groupName:   groupName,
-		metrics:     metrics,
-		labelValues: labelValues,
+		integration:     i,
+		groupName:       groupName,
+		notificationLog: notificationLog,
+		metrics:         metrics,
+		labelValues:     labelValues,
 	}
 }
 
@@ -789,6 +841,17 @@ func (r RetryStage) Exec(ctx context.Context, l *slog.Logger, alerts ...*types.A
 }
 
 func (r RetryStage) exec(ctx context.Context, l *slog.Logger, alerts ...*types.Alert) (context.Context, []*types.Alert, error) {
+	// Add notification log to context for notifiers (like Slack threading)
+	if r.notificationLog != nil {
+		if nflogInstance, ok := r.notificationLog.(*nflog.Log); ok {
+			ctx = WithNotificationLog(ctx, nflogInstance)
+		}
+	}
+
+	// Add slack thread timestamp container for notifiers to populate
+	slackThreadContainer := &SlackThreadTSContainer{}
+	ctx = WithSlackThreadTSContainer(ctx, slackThreadContainer)
+
 	var sent []*types.Alert
 
 	// If we shouldn't send notifications for resolved alerts, but there are only
@@ -936,6 +999,18 @@ func (n SetNotifiesStage) Exec(ctx context.Context, l *slog.Logger, alerts ...*t
 	}
 	expiry := 2 * repeat
 
+	// Extract slack thread timestamp from context and add it to nflog context
+	nflogCtx := ctx
+	if slackThreadTS, ok := SlackThreadTS(ctx); ok && slackThreadTS != "" {
+		nflogCtx = context.WithValue(ctx, nflog.SlackThreadTSKey, slackThreadTS)
+	}
+
+	// Use LogWithContext to pass slack thread timestamp to notification log
+	if logWithContext, ok := n.nflog.(*nflog.Log); ok {
+		return ctx, alerts, logWithContext.LogWithContext(nflogCtx, n.recv, gkey, firing, resolved, expiry)
+	}
+
+	// Fallback to regular Log method for compatibility
 	return ctx, alerts, n.nflog.Log(n.recv, gkey, firing, resolved, expiry)
 }
 

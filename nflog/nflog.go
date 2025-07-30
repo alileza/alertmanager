@@ -19,6 +19,7 @@ package nflog
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -42,6 +43,11 @@ var ErrNotFound = errors.New("not found")
 
 // ErrInvalidState is returned if the state isn't valid.
 var ErrInvalidState = errors.New("invalid state")
+
+// Context key for Slack thread timestamp
+type contextKey string
+
+const SlackThreadTSKey contextKey = "slack_thread_ts"
 
 // query currently allows filtering by and/or receiver group key.
 // It is configured via QueryParameter functions.
@@ -378,6 +384,11 @@ func stateKey(k string, r *pb.Receiver) string {
 }
 
 func (l *Log) Log(r *pb.Receiver, gkey string, firingAlerts, resolvedAlerts []uint64, expiry time.Duration) error {
+	return l.LogWithContext(context.Background(), r, gkey, firingAlerts, resolvedAlerts, expiry)
+}
+
+// LogWithContext logs a successful notification in the notification log with context support for extensions.
+func (l *Log) LogWithContext(ctx context.Context, r *pb.Receiver, gkey string, firingAlerts, resolvedAlerts []uint64, expiry time.Duration) error {
 	// Write all st with the same timestamp.
 	now := l.now()
 	key := stateKey(gkey, r)
@@ -398,14 +409,21 @@ func (l *Log) Log(r *pb.Receiver, gkey string, firingAlerts, resolvedAlerts []ui
 		expiresAt = now.Add(expiry)
 	}
 
+	entry := &pb.Entry{
+		Receiver:       r,
+		GroupKey:       []byte(gkey),
+		Timestamp:      now,
+		FiringAlerts:   firingAlerts,
+		ResolvedAlerts: resolvedAlerts,
+	}
+
+	// Extract Slack thread timestamp from context if available
+	if slackThreadTS, ok := ctx.Value(SlackThreadTSKey).(string); ok && slackThreadTS != "" {
+		entry.SlackThreadTs = slackThreadTS
+	}
+
 	e := &pb.MeshEntry{
-		Entry: &pb.Entry{
-			Receiver:       r,
-			GroupKey:       []byte(gkey),
-			Timestamp:      now,
-			FiringAlerts:   firingAlerts,
-			ResolvedAlerts: resolvedAlerts,
-		},
+		Entry:     entry,
 		ExpiresAt: expiresAt,
 	}
 
